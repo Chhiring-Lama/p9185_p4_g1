@@ -9,9 +9,9 @@ ss <- nSurv(
   eta = 0.02/12,
   T = 24, # study duration 24 months
   R = 3, # accrual duration 3 months
-  alpha = 0.05,
+  alpha = 0.025,
   beta = 0.20,
-  sided = 2
+  sided = 1
 )
 ss
 
