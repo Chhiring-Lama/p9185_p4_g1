@@ -1,0 +1,323 @@
+---
+title: "chhiring_analysis"
+author: "Chhiring Lama"
+date: "2026-03-23"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+header-includes:
+  - \usepackage{fancyhdr}
+  - \usepackage{lipsum}
+  - \pagestyle{fancy}
+  - \fancyhead[R]{\thepage}
+  - \fancypagestyle{plain}{\pagestyle{fancy}}
+  - \usepackage{enumitem}
+  - \usepackage{float}
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(gtsummary)
+library(performance)
+library(readxl)
+library(naniar)
+library(gt)
+library(kableExtra)
+library(lme4)
+library(nlme)
+library(ggpubr)
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+options(scipen = 999)
+```
+
+### data wrangling
+```{r}
+sae_df <- read_xlsx("data/Q2b.xlsx") |> 
+  janitor::clean_names() |> 
+  mutate(sae = ifelse(sae == 1, "Yes", "No") |> as.factor(), 
+         group = ifelse(group == 1, "Vaccine", "Control") |> as.factor())
+#time = as.factor(time), 
+         
+
+bl_df <- read_xlsx("data/Q2b_BL.xlsx") |> 
+  janitor::clean_names() |> 
+  mutate(sex = ifelse(sex == 1, "Male", "Female"), 
+         sex = fct_relevel(sex, "Male"))
+
+combined_dataset <- sae_df |> 
+  full_join(bl_df, by = "id") 
+
+combined_dataset_wide <- combined_dataset |> 
+  pivot_wider(names_from = "time", 
+              values_from = "sae", 
+              names_prefix = "month_")
+```
+
+Summary Table
+```{r}
+table1  <- combined_dataset %>%
+  drop_na() |> 
+  dplyr::select(time:age) %>%
+  tbl_summary(
+    by = group,
+    statistic = list(
+      all_continuous()  ~ "{mean} ({sd})",    # drop min/max to save space
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      time ~ 'Time (months)',
+      age ~ "Age (years)", 
+      sex ~ "Sex",
+      sae ~ "Severe Adverse Events (Yes)", 
+      site ~ "Number of Sites")
+  ) %>%
+  add_p() %>%
+  add_overall() %>%
+  bold_labels() %>%
+  modify_caption("**Baseline Characteristics by Treatment Group**")
+# table1v2 <- table1 %>%
+#   as_gt() %>%
+#   gt::tab_options(
+#     data_row.padding = px(2),
+#     table.width      = pct(100),
+#     table.border.top.color = "black",
+#     table.border.bottom.color = "black",
+#     heading.border.bottom.color = "black",
+#     table.font.color = "black",
+#     column_labels.border.bottom.style = "none", # Remove header line
+#     table_body.border.bottom.style = "none",    # Remove body line
+#     table_body.border.top.style = "none",
+#     table.border.top.style = "none",
+#     table.font.names = "arial",
+#     table.font.size = "12px" 
+#   ) |> 
+#   cols_width(
+#     label      ~ px(150),
+#     everything() ~ px(80)
+#   ) |> 
+#   gt::tab_style(
+#     style = gt::cell_borders(), 
+#     locations = gt::cells_body(columns = everything()))  |> 
+#   gt::gtsave(filename = "figures_tables/summarytab.pdf")
+#system("pdfcrop figures_tables/summarytab.pdf figures_tables/summarytab.pdf")
+
+table1 |> 
+  as_gt() |> 
+  cols_width(
+    label      ~ px(150),
+    everything() ~ px(80)
+  ) |>
+  gt::gtsave(filename = "figures_tables/summarytab.pdf")
+
+table1 |> 
+  as_kable()
+```
+
+
+Checking for missing data pattern (if any)
+```{r, out.width="100%", warning=FALSE}
+fig2a <- vis_miss(combined_dataset_wide) + 
+  theme(axis.text.x = element_text(vjust = 0))
+ggsave("figures_tables/missingdata_info.png", fig2a, height = 5, width =8)
+```
+
+Missingness only seen in outcome data (SAE) and more so for 2nd and third timepoints
+
+Missingness by gender
+```{r, fig.height = 3, fig.width=6, warning=FALSE}
+tx_gender_missing <- combined_dataset |> 
+  group_by(sex, time) |> 
+  mutate(total = length(unique(id))) |> 
+  ungroup() |> 
+  drop_na() |> 
+  group_by(sex, time) |> 
+  summarize (missing_pct = (total[1] - length(unique(id)))*100/total[1])
+
+missing_by_gender <- ggplot(aes(x = time, y = missing_pct, group = sex, color = sex), 
+       data = tx_gender_missing) +
+  geom_point() +
+  scale_x_continuous(limits = c(1, 3))+
+  geom_line() +
+  labs(x = "Time after Vaccine (in months)", y = "Missing Data %", color = "Sex") +
+  theme_classic()
+
+ggsave("figures_tables/missingness_by_gender.pdf", missing_by_gender, height = 3, width =5)
+#system("pdfcrop figures_tables/missingness_by_gender.pdf figures_tables/missingness_by_gender.pdf")
+missing_by_gender
+```
+
+### Characterise missingness pattern
+Number of drop outs 
+```{r, warning=FALSE}
+missingpattern <- combined_dataset_wide|> 
+  mutate(pattern = case_when(is.na(month_3) == FALSE ~ "Complete", 
+                             is.na(month_3) == TRUE & is.na(month_2) == TRUE &
+                               is.na(month_1) == TRUE ~ "Assessment Dropout", 
+                             is.na(month_3) == TRUE & is.na(month_2) == TRUE &
+                               is.na(month_1) == FALSE ~ "Early Dropout", 
+                             is.na(month_3) == TRUE ~ "Late Dropout"),  
+         pattern = fct_relevel(pattern, "Assessment Dropout", "Early Dropout", 
+                               "Late Dropout"))
+missingpattern1 <- missingpattern |> 
+  dplyr::select(c(sex, pattern)) |> 
+  tbl_summary(
+    by = pattern,
+    statistic = list(
+      all_continuous()  ~ "{mean} ({sd})",    # drop min/max to save space
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      sex ~ "Sex")
+  ) %>%
+  add_p() %>%
+  add_overall() %>%
+  bold_labels()
+
+missingpattern1 |> 
+  as_gt() |> 
+  gt::gtsave(filename = "figures_tables/missingpattern1.pdf")
+
+missingpattern1 |> 
+  as_kable()
+```
+
+```{r, warning=FALSE}
+missingpatternv2 <- missingpattern |> 
+  dplyr::select(c(group, pattern)) |> 
+  tbl_summary(
+    by = group,
+    statistic = list(
+      all_continuous()  ~ "{mean} ({sd})",    # drop min/max to save space
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    label = list(
+      pattern ~ "Missingness Pattern")
+  ) %>%
+  add_p() %>%
+  add_overall() %>%
+  bold_labels()
+
+missingpatternv2 |> 
+  as_gt() |> 
+  gt::gtsave(filename = "figures_tables/missingpatternv2.pdf")
+
+missingpatternv2 |> 
+  as_kable()
+```
+
+
+Only 3.7% missingness, ignoring for now
+
+EDA for SAE
+```{r, fig.height = 4, fig.width=9, warning=FALSE}
+sae_pct <- combined_dataset |> 
+  drop_na() |> 
+  group_by(group, time, site, sex) |> 
+  mutate(total = n()) |> 
+  ungroup() |> 
+  dplyr::filter(sae == "Yes") |>  
+  group_by(group, time, site, sex) |> 
+  summarise (sae_pct = n()*100/total[1]) |> 
+  mutate(group_time = paste(time, group, sep = "_")) 
+
+sae_pct_by_gender_persite <- ggplot(aes(x = group_time, y = sae_pct, color = group), 
+       data = sae_pct) +
+  geom_boxplot() +
+  geom_jitter(alpha = 0.4) +
+  stat_compare_means(comparisons = list(c("1_Control", "1_Vaccine"), 
+                                        c("2_Control", "2_Vaccine"), 
+                                        c("3_Control", "3_Vaccine")), 
+                     label = "p.adj.format",
+                     p.adjust.method = "bonferroni") +
+  labs(x = "Time after Vaccine (in months) + Tx Group", y = "Severe Adverse Event% (Per Site)", color = "Group") +
+  facet_wrap(~sex) +
+  theme_classic()
+
+ggsave("figures_tables/sae_pct_by_gender_persite.pdf", sae_pct_by_gender_persite, height = 5, width =11)
+#system("pdfcrop figures_tables/sae_pct_by_gender_persite.pdf figures_tables/sae_pct_by_gender_persite.pdf")
+sae_pct_by_gender_persite
+```
+
+```{r, fig.height = 3, fig.width=5, warning=FALSE}
+sae_pct <- combined_dataset |> 
+  drop_na() |> 
+  group_by(group, time) |> 
+  mutate(total = n()) |> 
+  ungroup() |> 
+  dplyr::filter(sae == "Yes") |>  
+  group_by(group, time) |> 
+  mutate (sae_pct = n()*100/total[1])
+
+sae_pct_by_gender <- ggplot(aes(x = time, y = sae_pct, group = group, color = group), 
+       data = sae_pct) +
+  geom_point() +
+  scale_x_continuous(limits = c(1, 3), breaks = c(1, 2, 3))+
+  geom_line() +
+  labs(x = "Time after Vaccine (in months)", y = "Severe Adverse Event %", color = "Group") +
+  theme_classic()
+
+ggsave("figures_tables/sae_pct_by_gender.pdf", sae_pct_by_gender, height = 3, width =5)
+#system("pdfcrop figures_tables/sae_pct_by_gender.pdf figures_tables/sae_pct_by_gender.pdf")
+sae_pct_by_gender
+```
+
+```{r, fig.height = 3, fig.width=7, warning=FALSE}
+sae_pct_by_group <- combined_dataset |> 
+  drop_na() |> 
+  group_by(sex, time, group) |> 
+  mutate(total = n()) |> 
+  ungroup() |> 
+  dplyr::filter(sae == "Yes") |>  
+  group_by(sex, time, group) |> 
+  mutate (sae_pct = n()*100/total[1])
+
+sae_pct_by_gender_group <- ggplot(aes(x = time, y = sae_pct, group = group, color = group), 
+       data = sae_pct_by_group) +
+  geom_point() +
+  scale_x_continuous(limits = c(1, 3), breaks = c(1, 2, 3))+
+  geom_line() +
+  facet_wrap(~sex) +
+  labs(x = "Time after Vaccine (in months)", y = "Severe Adverse Event %", color = "Group") +
+  theme_classic()
+
+ggsave("figures_tables/sae_pct_by_gender_group.pdf", sae_pct_by_gender_group, height = 3, width =7)
+#system("pdfcrop figures_tables/sae_pct_by_gender_group.pdf figures_tables/sae_pct_by_gender_group.pdf")
+sae_pct_by_gender_group
+```
+
+
+Modeling: GLMM to model for odds of SAE at each timepoint
+```{r, warning=FALSE}
+combined_dataset <- combined_dataset |> 
+  mutate(time = as.factor(time))
+glmm1 <- glmer(sae ~ group*time + group + sex + age + (1 | id), 
+               family = binomial, data = combined_dataset, nAGQ = 0)
+glmm2 <- glmer(sae ~ group + time + group + sex + age + (1 | id), 
+               family = binomial, data = combined_dataset, nAGQ = 0)
+anova(glmm1, glmm2)
+```
+Interaction term not needed
+
+```{r}
+combined_dataset <- combined_dataset |> 
+  mutate(time = as.factor(time))
+glmm3 <- glmer(sae ~ group*time + group + sex + age + (1 |site / id), 
+               family = binomial, data = combined_dataset, nAGQ = 0)
+anova(glmm1, glmm3)
+```
+read on correlation structure, addin two separate random intercept etc. 
+
