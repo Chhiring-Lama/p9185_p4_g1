@@ -1,5 +1,5 @@
 ---
-title: "chhiring_analysis"
+title: "Analysing Severe Adverse Effects"
 author: "Chhiring Lama"
 date: "2026-03-23"
 output:
