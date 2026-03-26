@@ -32,6 +32,8 @@ library(kableExtra)
 library(lme4)
 library(nlme)
 library(ggpubr)
+library(sjPlot)
+library(DHARMa)
 
 options(
   ggplot2.continuous.colour = "viridis",
@@ -69,9 +71,8 @@ combined_dataset_wide <- combined_dataset |>
 
 Summary Table
 ```{r}
-table1  <- combined_dataset %>%
-  drop_na() |> 
-  dplyr::select(time:age) %>%
+table1  <- combined_dataset_wide %>%
+  dplyr::select(group:age) %>%
   tbl_summary(
     by = group,
     statistic = list(
@@ -79,10 +80,10 @@ table1  <- combined_dataset %>%
       all_categorical() ~ "{n} ({p}%)"
     ),
     label = list(
-      time ~ 'Time (months)',
+      #time ~ 'Time (months)',
       age ~ "Age (years)", 
       sex ~ "Sex",
-      sae ~ "Severe Adverse Events (Yes)", 
+      #sae ~ "Severe Adverse Events (Yes)", 
       site ~ "Number of Sites")
   ) %>%
   add_p() %>%
@@ -128,6 +129,15 @@ table1 |>
 ```
 
 
+```{r}
+pdf("figures_tables/age_range.pdf", width = 6, height = 3)
+ggplot(aes(x = age, fill = group), data = combined_dataset_wide) +
+  geom_density(alpha = 0.4) +
+  labs(x = "Age", y = "Density", fill = "Tx group") +
+  theme_classic()
+dev.off()
+```
+
 Checking for missing data pattern (if any)
 ```{r, out.width="100%", warning=FALSE}
 fig2a <- vis_miss(combined_dataset_wide) + 
@@ -164,11 +174,20 @@ missing_by_gender
 Number of drop outs 
 ```{r, warning=FALSE}
 missingpattern <- combined_dataset_wide|> 
-  mutate(pattern = case_when(is.na(month_3) == FALSE ~ "Complete", 
+  mutate(pattern = case_when(is.na(month_3) == FALSE & is.na(month_2) == FALSE & 
+                               is.na(month_1) == FALSE ~ "Complete", ##all or at least 2 where one must be from month 3
+                             is.na(month_3) == FALSE & is.na(month_2) == TRUE & 
+                               is.na(month_1) == FALSE ~ "Complete",
+                             is.na(month_3) == FALSE & is.na(month_2) == FALSE & 
+                               is.na(month_1) == TRUE ~ "Complete",
                              is.na(month_3) == TRUE & is.na(month_2) == TRUE &
                                is.na(month_1) == TRUE ~ "Assessment Dropout", 
                              is.na(month_3) == TRUE & is.na(month_2) == TRUE &
                                is.na(month_1) == FALSE ~ "Early Dropout", 
+                             is.na(month_3) == TRUE & is.na(month_2) == FALSE &
+                               is.na(month_1) == TRUE ~ "Only 2nd Visit", 
+                             is.na(month_3) == FALSE & is.na(month_2) == TRUE &
+                               is.na(month_1) == TRUE ~ "Only 3rd Visit", 
                              is.na(month_3) == TRUE ~ "Late Dropout"),  
          pattern = fct_relevel(pattern, "Assessment Dropout", "Early Dropout", 
                                "Late Dropout"))
@@ -189,6 +208,16 @@ missingpattern1 <- missingpattern |>
 
 missingpattern1 |> 
   as_gt() |> 
+  cols_width(
+    label      ~ px(76),
+    everything() ~ px(64)
+  ) |>
+  tab_options(
+    table.font.size = px(10),
+    heading.title.font.size = px(11),
+    column_labels.font.size = px(10),
+    table.font.names = "Arial"
+  ) |> 
   gt::gtsave(filename = "figures_tables/missingpattern1.pdf")
 
 missingpattern1 |> 
@@ -218,8 +247,6 @@ missingpatternv2 |>
 missingpatternv2 |> 
   as_kable()
 ```
-
-
 Only 3.7% missingness, ignoring for now
 
 EDA for SAE
@@ -299,25 +326,280 @@ ggsave("figures_tables/sae_pct_by_gender_group.pdf", sae_pct_by_gender_group, he
 sae_pct_by_gender_group
 ```
 
+###sae by age per group
+```{r, fig.height = 3, fig.width=7, warning=FALSE}
+sae_by_age <- ggplot(aes(x = sae, y = age, color = sae), 
+       data = combined_dataset |> drop_na(sae) |> 
+  mutate(group_time = paste(group, time, sep = "_"))) +
+  geom_boxplot() +
+  labs(x = "SAE", y = "Age", color = "Group") +
+  facet_wrap(~group_time, ncol = 3)+
+  scale_y_continuous(limits = c(10, 120)) +
+  stat_compare_means() +
+  theme_classic()
+
+ggsave("figures_tables/sae_by_age.pdf", sae_by_age, height = 6, width =8)
+#system("pdfcrop figures_tables/sae_pct_by_gender_group.pdf figures_tables/sae_pct_by_gender_group.pdf")
+sae_by_age
+```
+
+
+Interaction term not needed
+read on correlation structure, addin two separate random intercept etc. 
+
+PMM: run GLMM per pattern
+```{r}
+long_df_w_pattern <- missingpattern |> 
+  pivot_longer(cols = month_1:month_3, 
+               names_to = "time", 
+               values_to = "sae") |> 
+  mutate(time = as.character(time))
+
+pattern_list <- setdiff(na.omit(as.character(unique(long_df_w_pattern$pattern))), 
+                        "Assessment Dropout")
+run_glmm <- lapply(pattern_list, function(pat){
+  df <- long_df_w_pattern |> dplyr::filter(pattern == pat) |> 
+    mutate(sae = as.character(sae), 
+           time = as.character(time)) |> 
+    drop_na()
+  if (length(unique(na.omit(df$sae))) > 1 & length(unique(df$time)) > 1){
+    print(pat)
+    print(unique(df$time))
+    df <- df |> 
+      mutate(sae = as.factor(sae), 
+             time = as.factor(time))
+    fit_PMM <- glmer(sae ~ group + time + sex + age + (1 | site),
+                        data = df, family = binomial, nAGQ = 0)
+  }
+  if (length(unique(na.omit(df$sae))) > 1 & length(unique(df$time)) == 1){
+    print(pat)
+    print(unique(df$time))
+    df <- df |> 
+      mutate(sae = as.factor(sae))
+    fit_PMM <- glmer(sae ~ group + sex + age + (1 | site),
+                        data = df, family = binomial, nAGQ = 0)
+  }
+  if (length(unique(na.omit(df$sae))) == 1 & length(unique(df$time)) == 1){
+    fit_PMM <- NULL
+  }
+  return(fit_PMM)
+})
+
+names(run_glmm) <- pattern_list
+run_glmm <- Filter(Negate(is.null), run_glmm)
+```
+
+##Compare coefficients
+```{r}
+pairs <- combn(names(run_glmm), 2, simplify = FALSE)
+
+lapply(pairs, function(compare){
+  first_fit <- run_glmm[[compare[1]]]
+  second_fit <- run_glmm[[compare[2]]]
+  coef_first <- fixef(first_fit)
+  coef_second <- fixef(second_fit)
+  
+  vcov_first <- vcov(first_fit)
+  vcov_second <- vcov(second_fit)
+  
+  overlapping_terms <- intersect(names(coef_first), 
+                                 names(coef_second))
+  res_complete_late <- lapply(overlapping_terms, function(term){
+  
+    beta1 <- coef_first[term]
+    beta2 <- coef_second[term]
+  
+    var1 <- vcov_first[term, term]
+    var2 <- vcov_second[term, term]
+  
+    z <- (beta1 - beta2) / sqrt(var1 + var2)
+    p <- 2 * (1 - pnorm(abs(z)))
+    
+    data.frame(
+      `Group` = paste0(compare[1], " vs ", compare[2]), 
+      `Beta1` = beta1, `Beta2` = beta2, `z` = z, `P-value` = p
+    )
+  })
+  comp <- knitr::kable(as.data.frame(do.call(rbind, res_complete_late)), digits = 3) |> 
+    kable_styling(latex_options = c("striped", "hold_position"), font_size = 12)
+  print(comp)
+  #save_kable(comp, file = paste0("figures_tables/coef_comparison", compare[1], compare[2], ".pdf"))
+})
+```
 
 Modeling: GLMM to model for odds of SAE at each timepoint
 ```{r, warning=FALSE}
-combined_dataset <- combined_dataset |> 
+combined_dataset2 <- combined_dataset |> 
   mutate(time = as.factor(time))
-glmm1 <- glmer(sae ~ group*time + group + sex + age + (1 | id), 
-               family = binomial, data = combined_dataset, nAGQ = 0)
-glmm2 <- glmer(sae ~ group + time + group + sex + age + (1 | id), 
-               family = binomial, data = combined_dataset, nAGQ = 0)
-anova(glmm1, glmm2)
-```
-Interaction term not needed
+glmm <- glmer(sae ~ group*time + sex + age + (1 | id), 
+               family = binomial, data = combined_dataset2, nAGQ = 0)
 
-```{r}
-combined_dataset <- combined_dataset |> 
-  mutate(time = as.factor(time))
-glmm3 <- glmer(sae ~ group*time + group + sex + age + (1 |site / id), 
-               family = binomial, data = combined_dataset, nAGQ = 0)
-anova(glmm1, glmm3)
 ```
-read on correlation structure, addin two separate random intercept etc. 
+Singularity issue when including site +id or site(id)
+
+
+Final Model:
+$$
+\begin{aligned}
+\widehat{logit}(P(SAE_{ijk} = 1)) & = \beta_0 + \beta_1.I(Group_{ijk} \text{ = Vaccine)} + \beta_2.I(Month_{ijk} \text{= 2)}  + \\
+&\quad \beta_3.I(Month_{ijk} \text{ = 3)} + \beta_4.I(Sex_{ijk} \text{ = Female)} + \beta_5.Age_{ijk} + b_{i}, \\
+&\quad i = (1, 2, \ldots, 100),j = (1, 2, \ldots, 41250), \ k = 1, 2, 3, \\
+&\quad b_{i} \sim N(0, {{\sigma}^2}_b)
+\end{aligned}
+$$
+
+Result form GLMM2
+```{r}
+glmm_ad_table <- tbl_regression(
+  glmm,
+  exponentiate = TRUE, 
+  intercept = TRUE,
+  label = list(
+    group ~ "Treatment",
+    time ~ "Time (month)",
+    sex ~ "Sex", 
+    age ~ "Age"),
+  estimate_fun = function(x) {
+  ifelse(abs(x) < 1e-2,
+         formatC(x, format = "e", digits = 2),
+         style_number(x, digits = 2))
+}) %>%
+  bold_p() %>%
+  bold_labels()
+glmm_ad_table
+```
+
+
+# ```{R}
+# mem.maxVSize(30*1024^3)
+# plot_model(glmm2, type = "pred", terms = c("age [25:75]", "time", "group"), ci.lvl = 0.95) +
+#   labs(title = "",  
+#        y = "Predicted Probability",
+#      x = "Age", 
+#      color = "Time") +
+#   scale_y_continuous(labels = function(x) formatC(x, digits = 3, format = "g")) +
+#   theme_classic()
+# ggsave("figures_tables/predicted_prob.pdf", height = 4, width =8)
+# ```
+
+##Diagnostics
+```{r}
+sim_ad <- simulateResiduals(fittedModel = glmm)
+pdf("figures_tables/model_diganostics.pdf", width = 7, height = 5)
+plot(sim_ad)
+dev.off()
+plot(sim_ad)
+```
+
+```{r, fig.height=12, fig.width=10,  fig.align='left'}
+#check_model(glmm)
+# pdf("figures_tables/model_diganostics2.pdf", width = 10, height = 12)
+# check_model(glmm)
+# dev.off()
+```
+
+
+<!-- ### Sensitivity Analysis with MICE -->
+<!-- ```{r} -->
+<!-- library(mice) -->
+<!-- library(lme4) -->
+
+<!-- # 1. Multiple Imputation -->
+<!-- imp <- mice(long_df_w_pattern, m = 5, method = "logreg", seed = 123) ##gives MAR-based imputations -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- delta_adjust_binary_pp <- function(imp, data, delta, var = "sae") { -->
+
+<!--   imp_adj <- imp -->
+
+<!--   for (i in 1:imp$m) { -->
+
+<!--     d <- complete(imp, i) -->
+
+<!--     # Identify missing outcome -->
+<!--     miss_idx <- which(is.na(data[[var]])) -->
+
+<!--     # Fit logistic model to get predicted probabilities -->
+<!--     fit <- glmer(sae ~ group + time + sex + age + (1 | site) ,  -->
+<!--                family = binomial, data = d, nAGQ = 0) -->
+
+<!--     # Predicted probabilities for all rows -->
+<!--     p <- predict(fit, type = "response") -->
+
+<!--     # Bound probabilities (avoid 0/1) -->
+<!--     p <- pmin(pmax(p, 1e-6), 1 - 1e-6) -->
+
+<!--     # Apply delta shift (logit scale) -->
+<!--     logit_p <- qlogis(p) -->
+<!--     logit_shift <- logit_p + delta -->
+<!--     p_shift <- plogis(logit_shift) -->
+
+<!--     # Re-simulate ONLY missing outcomes -->
+<!--     d[[var]][miss_idx] <- rbinom(sum(miss_idx), 1, p_shift[miss_idx]) -->
+
+<!--     # Update mice object -->
+<!--     imp_adj$imp[[var]][[i]] <- d[miss_idx, var] -->
+<!--   } -->
+
+<!--   return(imp_adj) -->
+<!-- } -->
+
+<!-- library(lme4) -->
+
+<!-- deltas <- c(-2, -1, -0.5, 0, 0.5, 1, 2) -->
+
+<!-- results <- list() -->
+
+<!-- for (d in deltas) { -->
+
+<!--   imp_d <- delta_adjust_binary_pp(imp, long_df_w_pattern, delta = d) -->
+
+<!--   fit <- with(imp_d, glmer( -->
+<!--     sae ~ group + time + sex + age + (1 | site), -->
+<!--     family = binomial, -->
+<!--     nAGQ = 0 -->
+<!--   )) -->
+
+<!--   results[[as.character(d)]] <- pool(fit) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- extract_term <- function(pooled) { -->
+<!--   s <- summary(pooled) -->
+<!--   s <- s[, c("term", "estimate", "std.error", "p.value")] -->
+<!--   s <- s |>  -->
+<!--     mutate(across(where(is.numeric), ~ formatC(., digits = 3, format = "g")),  -->
+<!--            estimate = as.numeric(estimate),  -->
+<!--            `std.error` = as.numeric(`std.error`)) -->
+<!--   return(s) -->
+<!-- } -->
+
+<!-- summary_table <- lapply(names(results), function(d) { -->
+<!--   df <- extract_term(results[[d]]) -->
+<!--   df$delta <- d -->
+<!--   return (df) -->
+<!-- }) -->
+
+<!-- summary_table <- Reduce(rbind, summary_table) -->
+
+<!-- print(summary_table) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- library(ggplot2) -->
+
+<!-- summary_table$delta <- as.numeric(summary_table$delta) -->
+
+<!-- ggplot(summary_table[summary_table$term == "groupVaccine",], aes(x = delta, y = estimate, color = term)) + -->
+<!--   geom_line() + -->
+<!--   geom_point() + -->
+<!--   geom_errorbar(aes( -->
+<!--     ymin = estimate - 1.96 * `std.error`, -->
+<!--     ymax = estimate - 1.96 * `std.error` -->
+<!--   ), width = 0.05) + -->
+<!--   labs(x = "Delta (MNAR shift)", y = "Estimate") + -->
+<!--   theme_minimal() -->
+<!-- ``` -->
 
