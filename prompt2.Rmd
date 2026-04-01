@@ -431,7 +431,7 @@ Modeling: GLMM to model for odds of SAE at each timepoint
 ```{r, warning=FALSE}
 combined_dataset2 <- combined_dataset |> 
   mutate(time = as.factor(time))
-glmm <- glmer(sae ~ group*time + sex + age + (1 | id), 
+glmm <- glmer(sae ~ group*time + sex + age + (1 | site) + (1 | id) , 
                family = binomial, data = combined_dataset2, nAGQ = 0)
 
 ```
@@ -442,17 +442,18 @@ Final Model:
 $$
 \begin{aligned}
 \widehat{logit}(P(SAE_{ijk} = 1)) & = \beta_0 + \beta_1.I(Group_{ijk} \text{ = Vaccine)} + \beta_2.I(Month_{ijk} \text{= 2)}  + \\
-&\quad \beta_3.I(Month_{ijk} \text{ = 3)} + \beta_4.I(Sex_{ijk} \text{ = Female)} + \beta_5.Age_{ijk} + b_{i}, \\
+&\quad \beta_3.I(Month_{ijk} \text{ = 3)} + \beta_4.I(Sex_{ijk} \text{ = Female)} + \beta_5.Age_{ijk} + b_{i} + c_{j}, \\
 &\quad i = (1, 2, \ldots, 100),j = (1, 2, \ldots, 41250), \ k = 1, 2, 3, \\
 &\quad b_{i} \sim N(0, {{\sigma}^2}_b)
 \end{aligned}
 $$
 
-Result form GLMM2
+Result form GLMM2 (Main Effects)
 ```{r}
 glmm_ad_table <- tbl_regression(
   glmm,
   exponentiate = TRUE, 
+  include = c("(Intercept)", "group", "time","sex", "age"),
   intercept = TRUE,
   label = list(
     group ~ "Treatment",
@@ -465,9 +466,30 @@ glmm_ad_table <- tbl_regression(
          style_number(x, digits = 2))
 }) %>%
   bold_p() %>%
-  bold_labels()
+  bold_labels() 
 glmm_ad_table
 ```
+
+ANOVA for interaction term
+```{r}
+glmm_ad_table <- tbl_regression(
+  glmm,
+  exponentiate = TRUE, 
+  include = c("group:time"),
+  intercept = TRUE,
+  label = list(
+    `group:time` ~ "Treatment:Time (month)"),
+  estimate_fun = function(x) {
+  ifelse(abs(x) < 1e-2,
+         formatC(x, format = "e", digits = 2),
+         style_number(x, digits = 2))
+}) %>%
+  bold_p() %>%
+  bold_labels() |> 
+  add_global_p() ##run anova for interaction term
+glmm_ad_table
+```
+
 
 
 # ```{R}
@@ -497,109 +519,4 @@ plot(sim_ad)
 # check_model(glmm)
 # dev.off()
 ```
-
-
-<!-- ### Sensitivity Analysis with MICE -->
-<!-- ```{r} -->
-<!-- library(mice) -->
-<!-- library(lme4) -->
-
-<!-- # 1. Multiple Imputation -->
-<!-- imp <- mice(long_df_w_pattern, m = 5, method = "logreg", seed = 123) ##gives MAR-based imputations -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-<!-- delta_adjust_binary_pp <- function(imp, data, delta, var = "sae") { -->
-
-<!--   imp_adj <- imp -->
-
-<!--   for (i in 1:imp$m) { -->
-
-<!--     d <- complete(imp, i) -->
-
-<!--     # Identify missing outcome -->
-<!--     miss_idx <- which(is.na(data[[var]])) -->
-
-<!--     # Fit logistic model to get predicted probabilities -->
-<!--     fit <- glmer(sae ~ group + time + sex + age + (1 | site) ,  -->
-<!--                family = binomial, data = d, nAGQ = 0) -->
-
-<!--     # Predicted probabilities for all rows -->
-<!--     p <- predict(fit, type = "response") -->
-
-<!--     # Bound probabilities (avoid 0/1) -->
-<!--     p <- pmin(pmax(p, 1e-6), 1 - 1e-6) -->
-
-<!--     # Apply delta shift (logit scale) -->
-<!--     logit_p <- qlogis(p) -->
-<!--     logit_shift <- logit_p + delta -->
-<!--     p_shift <- plogis(logit_shift) -->
-
-<!--     # Re-simulate ONLY missing outcomes -->
-<!--     d[[var]][miss_idx] <- rbinom(sum(miss_idx), 1, p_shift[miss_idx]) -->
-
-<!--     # Update mice object -->
-<!--     imp_adj$imp[[var]][[i]] <- d[miss_idx, var] -->
-<!--   } -->
-
-<!--   return(imp_adj) -->
-<!-- } -->
-
-<!-- library(lme4) -->
-
-<!-- deltas <- c(-2, -1, -0.5, 0, 0.5, 1, 2) -->
-
-<!-- results <- list() -->
-
-<!-- for (d in deltas) { -->
-
-<!--   imp_d <- delta_adjust_binary_pp(imp, long_df_w_pattern, delta = d) -->
-
-<!--   fit <- with(imp_d, glmer( -->
-<!--     sae ~ group + time + sex + age + (1 | site), -->
-<!--     family = binomial, -->
-<!--     nAGQ = 0 -->
-<!--   )) -->
-
-<!--   results[[as.character(d)]] <- pool(fit) -->
-<!-- } -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-<!-- extract_term <- function(pooled) { -->
-<!--   s <- summary(pooled) -->
-<!--   s <- s[, c("term", "estimate", "std.error", "p.value")] -->
-<!--   s <- s |>  -->
-<!--     mutate(across(where(is.numeric), ~ formatC(., digits = 3, format = "g")),  -->
-<!--            estimate = as.numeric(estimate),  -->
-<!--            `std.error` = as.numeric(`std.error`)) -->
-<!--   return(s) -->
-<!-- } -->
-
-<!-- summary_table <- lapply(names(results), function(d) { -->
-<!--   df <- extract_term(results[[d]]) -->
-<!--   df$delta <- d -->
-<!--   return (df) -->
-<!-- }) -->
-
-<!-- summary_table <- Reduce(rbind, summary_table) -->
-
-<!-- print(summary_table) -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-<!-- library(ggplot2) -->
-
-<!-- summary_table$delta <- as.numeric(summary_table$delta) -->
-
-<!-- ggplot(summary_table[summary_table$term == "groupVaccine",], aes(x = delta, y = estimate, color = term)) + -->
-<!--   geom_line() + -->
-<!--   geom_point() + -->
-<!--   geom_errorbar(aes( -->
-<!--     ymin = estimate - 1.96 * `std.error`, -->
-<!--     ymax = estimate - 1.96 * `std.error` -->
-<!--   ), width = 0.05) + -->
-<!--   labs(x = "Delta (MNAR shift)", y = "Estimate") + -->
-<!--   theme_minimal() -->
-<!-- ``` -->
 
